@@ -12,3 +12,5 @@ data:
 {{ include (print .Template.BasePath "/bin/_db-migrate.tpl") . | indent 4 }}
   db-online-migrate: |
 {{ include (print .Template.BasePath "/bin/_db-online-migrate.tpl") . | indent 4 }}
+  nova-nanny: |
+{{ include (print .Template.BasePath "/bin/_nova-nanny.tpl") . | indent 4 }}

@@ -1,0 +1,136 @@
+{{- define "nanny.container" -}}
+{{- $container_name := index . 1 -}}
+{{- $cell_config_path := index . 2 -}}
+{{- $resources := index . 3 -}}
+{{- with index . 0 }}
+- name: {{ $container_name | quote }}
+  image: {{ tuple . "api" | include "container_image_nova" }}
+  imagePullPolicy: IfNotPresent
+  command:
+  - /container.init/nova-nanny
+  env:
+  - name: PYTHONWARNINGS
+    value: {{ .Values.python_warnings | quote }}
+  - name: NOVA_DB_PURGE_ENABLED
+    value: {{ .Values.nanny.db_purge.enabled | quote }}
+  - name: NOVA_DB_PURGE_DRY_RUN
+    value: {{ .Values.nanny.db_purge.dry_run | quote }}
+  - name: NOVA_DB_PURGE_OLDER_THAN
+    value: {{ .Values.nanny.db_purge.older_than | quote }}
+  - name: NOVA_DB_PURGE_MAX_NUMBER
+    value: {{ .Values.nanny.db_purge.max_number | quote }}
+  - name: NOVA_CONSISTENCY_ENABLED
+    value: {{ .Values.nanny.consistency.enabled | quote }}
+  - name: NOVA_CONSISTENCY_DRY_RUN
+    value: {{ .Values.nanny.consistency.dry_run | quote }}
+  - name: NOVA_CONSISTENCY_OLDER_THAN
+    value: {{ .Values.nanny.consistency.older_than | quote }}
+  - name: NOVA_CONSISTENCY_MAX_INSTANCE_FAULTS
+    value: {{ .Values.nanny.consistency.max_instance_faults | quote }}
+  - name: NOVA_CONSISTENCY_FIX_LIMIT
+    value: {{ .Values.nanny.consistency.fix_limit | quote }}
+  - name: NOVA_QUEENS_INSTANCE_MAPPING_ENABLED
+    value: {{ .Values.nanny.consistency.queens_instance_mapping_enabled | quote }}
+  - name: NOVA_QUEENS_INSTANCE_MAPPING_DRY_RUN
+    value: {{ .Values.nanny.consistency.queens_instance_mapping_dry_run | quote }}
+  - name: CELL_CONFIG_PATH
+    value: /etc/nova/{{ $cell_config_path }}
+  volumeMounts:
+  - mountPath: /etc/nova
+    name: nova-etc
+  - mountPath: /container.init
+    name: container-init
+  {{- include "utils.proxysql.volume_mount" . | indent 2 }}
+  {{- include "utils.trust_bundle.volume_mount" . | indent 2 }}
+  resources:
+{{ $resources | toYaml | indent 4 }}
+{{- end -}}
+{{- end -}}
+{{- if .Values.nanny.enabled -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nova-nanny
+  labels:
+    system: openstack
+    component: nova
+    type: nanny
+spec:
+  schedule: {{ .Values.nanny.schedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          {{- tuple . "nova-nanny" | include "job_metadata" | indent 10 }}
+        spec:
+          restartPolicy: OnFailure
+          {{- include "utils.proxysql.job_pod_settings" . | indent 10 }}
+          volumes:
+          - name: container-init
+            configMap:
+              name: nova-bin
+              defaultMode: 0755
+          {{- include "utils.proxysql.volumes" . | indent 10 }}
+          {{- include "utils.trust_bundle.volumes" . | indent 10 }}
+          - name: nova-etc
+            projected:
+              sources:
+              - configMap:
+                  name: nova-etc
+                  items:
+                  - key:  nova.conf
+                    path: nova.conf
+                  - key:  nova-api.conf
+                    path: nova-api.conf
+                  - key:  api-paste.ini
+                    path: api-paste.ini
+                  - key:  policy.yaml
+                    path: policy.yaml
+                  - key:  logging.ini
+                    path: logging.ini
+                  - key:  rootwrap.conf
+                    path: rootwrap.conf
+                  - key:  api-metadata.filters
+                    path: rootwrap.d/api-metadata.filters
+                  - key:  release
+                    path: release
+                  {{- if .Values.audit.enabled }}
+                  - key:  nova_audit_map.yaml
+                    path: nova_audit_map.yaml
+                  {{- end }}
+                  {{- if .Values.watcher.enabled }}
+                  - key:  watcher.yaml
+                    path: watcher.yaml
+                  {{- end }}
+              - secret:
+                  name: nova-etc
+                  items:
+                  - key: api-db.conf
+                    path: nova.conf.d/api-db.conf
+                  - key: cell1.conf
+                    path: nova.conf.d/cell1.conf
+{{- if .Values.cell2.enabled }}
+                  - key:  {{ .Values.cell2.name }}.conf
+                    path: nova-{{ .Values.cell2.name }}.conf
+{{- end }}
+                  - key: keystoneauth-secrets.conf
+                    path: nova.conf.d/keystoneauth-secrets.conf
+                  {{- if .Values.audit.enabled }}
+                  - key: audit-middleware.conf
+                    path: nova.conf.d/audit-middleware.conf
+                  {{- end }}
+          initContainers:
+          {{- tuple . (dict "service" (include "nova.helpers.database_services" .)) | include "utils.snippets.kubernetes_entrypoint_init_container" | indent 10 }}
+          containers:
+          {{- $cell1_requests := dict "memory" "5000Mi" "cpu" "1000m"}}
+          {{- $cell1_limits := dict "memory" "5000Mi" "cpu" "1000m"}}
+          {{- $cell1_resources := dict "requests" $cell1_requests "limits" $cell1_limits  }}
+          {{- tuple . "nova-nanny" "nova.conf.d/cell1.conf" $cell1_resources | include "nanny.container" | indent 10 }}
+{{- if .Values.cell2.enabled }}
+          {{- $cell2_requests := dict "memory" "1000Mi" "cpu" "25m"}}
+          {{- $cell2_limits := dict "memory" "1000Mi" "cpu" "100m"}}
+          {{- $cell2_resources := dict "requests" $cell2_requests "limits" $cell2_limits  }}
+          {{- tuple . "nova-nanny-{{ .Values.cell2.name }}" "nova-{{ .Values.cell2.name }}.conf" $cell2_resources | include "nanny.container" | indent 10 }}
+{{- end }}
+{{- end }}
